@@ -275,4 +275,5 @@ cc_test(
     size = "large",
     srcs = ["fuzz-test.c++"],
     deps = [":capnp-test"],
+    tags = ["manual"],
 )
