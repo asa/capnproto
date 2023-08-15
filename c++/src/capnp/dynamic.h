@@ -503,7 +503,7 @@ public:
 private:
   InterfaceSchema schema;
 
-  Client(InterfaceSchema schema, kj::Own<ClientHook>&& hook)
+  Client(InterfaceSchema schema, kj::Rc<ClientHook>&& hook)
       : Capability::Client(kj::mv(hook)), schema(schema) {}
 
   template <typename T>
@@ -1105,7 +1105,7 @@ template <>
 inline Orphan<DynamicCapability> Orphanage::newOrphanCopy<DynamicCapability::Client>(
     DynamicCapability::Client copyFrom) const {
   return Orphan<DynamicCapability>(
-      copyFrom.getSchema(), _::OrphanBuilder::copy(arena, capTable, copyFrom.hook->addRef()));
+      copyFrom.getSchema(), _::OrphanBuilder::copy(arena, capTable, copyFrom.hook.addRef()));
 }
 
 template <>
@@ -1624,7 +1624,7 @@ typename T::Client DynamicCapability::Client::as() {
   static_assert(kind<T>() == Kind::INTERFACE,
                 "DynamicCapability::Client::as<T>() can only convert to interface types.");
   schema.requireUsableAs<T>();
-  return typename T::Client(hook->addRef());
+  return typename T::Client(hook.addRef());
 }
 
 template <typename T, typename>
@@ -1671,7 +1671,7 @@ inline kj::Promise<void> CallContext<DynamicStruct, DynamicStruct>::tailCall(
 template <>
 inline DynamicCapability::Client Capability::Client::castAs<DynamicCapability>(
     InterfaceSchema schema) {
-  return DynamicCapability::Client(schema, hook->addRef());
+  return DynamicCapability::Client(schema, hook.addRef());
 }
 
 template <>
