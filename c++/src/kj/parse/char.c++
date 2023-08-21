@@ -39,7 +39,7 @@ double ParseFloat::operator()(const Array<char>& digits,
     bufSize += 1 + (get<0>(*e) != nullptr) + get<1>(*e).size();
   }
 
-  KJ_STACK_ARRAY(char, buf, bufSize + 1, 128, 128);
+  SboArray<char, 128> buf(bufSize + 1);
 
   char* pos = buf.begin();
   memcpy(pos, digits.begin(), digits.size());
