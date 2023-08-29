@@ -115,5 +115,22 @@ void HeapArrayDisposer::disposeImpl(
 
 const HeapArrayDisposer HeapArrayDisposer::instance = HeapArrayDisposer();
 
+void* SboArrayDisposerBase::allocateImpl(
+    void* firstElement, size_t elementSize, size_t elementCount, size_t capacity,
+    void (*constructElement)(void*),
+    void (*destroyElement)(void*)) {
+  allocateImplImpl(firstElement, elementSize, elementCount, constructElement, destroyElement);
+  return firstElement;
+}
+
+void SboArrayDisposerBase::disposeImpl(
+    void* firstElement, size_t elementSize, size_t elementCount, size_t capacity,
+    void (*destroyElement)(void*)) const {
+  if (destroyElement != nullptr) {
+    ExceptionSafeArrayUtil guard(firstElement, elementSize, elementCount, destroyElement);
+    guard.destroyAll();
+  }
+}
+
 }  // namespace _ (private)
 }  // namespace kj

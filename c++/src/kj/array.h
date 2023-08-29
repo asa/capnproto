@@ -285,9 +285,37 @@ private:
                    size_t capacity, void (*destroyElement)(void*)) const override;
 };
 
-  template <typename T, bool hasTrivialConstructor = KJ_HAS_TRIVIAL_CONSTRUCTOR(T),
-                        bool hasNothrowConstructor = KJ_HAS_NOTHROW_CONSTRUCTOR(T)>
-  struct Allocate_;
+class SboArrayDisposerBase: public ArrayDisposer {
+public:
+  static void* allocateImpl(void* firstElement, size_t elementSize, size_t elementCount,
+                     size_t capacity, void (*constructElement)(void*),
+                     void (*destroyElement)(void*));
+  // Allocates and constructs the array.  Both function pointers are null if the constructor is
+  // trivial, otherwise destroyElement is null if the constructor doesn't throw.
+
+private:
+  void disposeImpl(void* firstElement, size_t elementSize, size_t elementCount,
+                   size_t capacity, void (*destroyElement)(void*)) const override;
+};
+
+template <typename T, size_t smallSize>
+class SboArrayDisposer: public SboArrayDisposerBase {
+public:
+  explicit SboArrayDisposer() {};
+  ~SboArrayDisposer() noexcept(false) {};
+  // The presence of `space` implicitly deletes our default constructor and destructor, so we have
+  // define no-op versions. The allocation helper functions and Array<T>'s destructor will perform
+  // the actual lifetime management.
+
+  KJ_DISALLOW_COPY_AND_MOVE(SboArrayDisposer);
+
+  T* allocate(size_t count);
+  RemoveConst<T>* allocateUninitialized(size_t count);
+
+private:
+  union {
+    T space[smallSize];
+  };
 };
 
 }  // namespace _ (private)
@@ -574,6 +602,81 @@ private:
 };
 
 // =======================================================================================
+// Small-buffer-optimized SboArray and SboArrayBuilder
+//
+// SboArray and SboArrayBuilder are useful when you need a temporary buffer, whose size you
+// cannot know until runtime but is likely to be small, and whose lifetime can be bounded by either
+// the stack or some immovable parent object.
+//
+// SboArray and SboArrayBuilder are not Arrays or ArrayBuilders. In particular, they have following
+// differences:
+//
+// 1. SboArray/Builder have an inline buffer of `smallSize` elements, where `smallSize` is a size_t
+//    template parameter. If they are constructed with a size less than or equal to `smallSize`, the
+//    inline space is used, and no heap allocation is performed. Otherwise, a regular heap Array is
+//    allocated.
+//
+// 2. SboArray/Builder are immovable. You must construct them in place wherever you want to use one.
+//    They cannot be "released", "finished", or assigned-to.
+//
+// 3. SboArray/Builder have no specific constructor functions like `heapArray<T>()` or
+//    `heapArrayBuilder<T>()`. Instead, use their constructors directly, passing a single `size`
+//    parameter.
+
+
+template <typename T, size_t smallSize>
+class SboArray: private _::SboArrayDisposer<T, smallSize>,
+                private Array<T> {
+public:
+  explicit SboArray(size_t size);
+  KJ_DISALLOW_COPY_AND_MOVE(SboArray);
+
+  // We support the full Array<T> API except `releaseAsBytes()`, `releaseAsChars()`, `operator=()`,
+  // and `attach()`.
+
+  using Array<T>::operator ArrayPtr<T>;
+  using Array<T>::operator ArrayPtr<const T>;
+  using Array<T>::asPtr;
+  using Array<T>::size;
+  using Array<T>::operator[];
+  using Array<T>::begin;
+  using Array<T>::end;
+  using Array<T>::front;
+  using Array<T>::back;
+  using Array<T>::operator==;
+  using Array<T>::slice;
+  using Array<T>::asBytes;
+  using Array<T>::asChars;
+};
+
+template <typename T, size_t smallSize>
+class SboArrayBuilder: private _::SboArrayDisposer<T, smallSize>,
+                       private ArrayBuilder<T> {
+public:
+  explicit SboArrayBuilder(size_t size);
+  KJ_DISALLOW_COPY_AND_MOVE(SboArrayBuilder);
+
+  // We support the full ArrayBuilder<T> API except `finish()` and `operator=()`.
+  using ArrayBuilder<T>::operator ArrayPtr<T>;
+  using ArrayBuilder<T>::operator ArrayPtr<const T>;
+  using ArrayBuilder<T>::asPtr;
+  using ArrayBuilder<T>::size;
+  using ArrayBuilder<T>::capacity;
+  using ArrayBuilder<T>::operator[];
+  using ArrayBuilder<T>::begin;
+  using ArrayBuilder<T>::end;
+  using ArrayBuilder<T>::front;
+  using ArrayBuilder<T>::back;
+  using ArrayBuilder<T>::add;
+  using ArrayBuilder<T>::addAll;
+  using ArrayBuilder<T>::removeLast;
+  using ArrayBuilder<T>::truncate;
+  using ArrayBuilder<T>::clear;
+  using ArrayBuilder<T>::resize;
+  using ArrayBuilder<T>::isFull;
+};
+
+// =======================================================================================
 // KJ_MAP
 
 #define KJ_MAP(elementName, array) \
@@ -649,6 +752,19 @@ void ArrayDisposer::dispose(T* firstElement, size_t elementCount, size_t capacit
   Dispose_<T>::dispose(firstElement, elementCount, capacity, *this);
 }
 
+template <typename T, size_t smallSize>
+SboArray<T, smallSize>::SboArray(size_t size)
+    : Array<T>(size <= smallSize
+        ? Array<T>(_::SboArrayDisposer<T, smallSize>::allocate(size), size, *this)
+        : heapArray<T>(size)) {}
+
+template <typename T, size_t smallSize>
+SboArrayBuilder<T, smallSize>::SboArrayBuilder(size_t size)
+    : ArrayBuilder<T>(size <= smallSize
+        ? ArrayBuilder<T>(
+            _::SboArrayDisposer<T, smallSize>::allocateUninitialized(size), size, *this)
+        : heapArrayBuilder<T>(size)) {}
+
 namespace _ {  // private
 
 template <typename T, bool hasTrivialConstructor = KJ_HAS_TRIVIAL_CONSTRUCTOR(T),
@@ -697,6 +813,22 @@ T* HeapArrayDisposer::allocate(size_t count) {
 template <typename T>
 T* HeapArrayDisposer::allocateUninitialized(size_t count) {
   return Allocate_<T, true, true>::allocate(allocateImpl, 0, count);
+}
+
+template <typename T, size_t smallSize>
+T* SboArrayDisposer<T, smallSize>::allocate(size_t count) {
+  return Allocate_<T>::allocate([this](auto&&... args) {
+    allocateImpl(space, kj::fwd<decltype(args)>(args)...);
+    return space;
+  }, count, count);
+}
+
+template <typename T, size_t smallSize>
+RemoveConst<T>* SboArrayDisposer<T, smallSize>::allocateUninitialized(size_t count) {
+  return Allocate_<T, true, true>::allocate([this](auto&&... args) {
+    allocateImpl(space, kj::fwd<decltype(args)>(args)...);
+    return space;
+  }, 0, count);
 }
 
 template <typename Element, typename Iterator, bool move, bool = canMemcpy<Element>()>
